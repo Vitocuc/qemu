@@ -5,7 +5,8 @@
 #include "hw/qdev-properties.h"
 #include "chardev/char.h" // Per qemu_chr_fe_*
 
-
+// prova per il commit
+cc
 // PRIMA REVISIONE 17 MAY -19.35
 static void nxps32k358_lpuart_update_irq(NXPS32K358LpuartState *s) {
     bool irq_pending = false;
