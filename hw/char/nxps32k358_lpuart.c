@@ -4,16 +4,21 @@
 #include "hw/char/nxps32k358_lpuart.h"
 #include "hw/qdev-properties.h"
 #include "chardev/char.h" // Per qemu_chr_fe_*
+#include "trace.h"    // tracing system of qemu
 
-// prova per il commit
-cc
+
+// SECONDA REVISIONE 20 MAY
+/*
+ 
+*/
+
 // PRIMA REVISIONE 17 MAY -19.35
 static void nxps32k358_lpuart_update_irq(NXPS32K358LpuartState *s) {
-    bool irq_pending = false;
+    int irq_pending = 0;
 
     // Controlla l'interrupt di ricezione dati
     if ((s->lpuart_cr & LPUART_CTRL_RIE) && (s->lpuart_sr & LPUART_STAT_RDRF)) {
-        irq_pending = true;
+        irq_pending = 1;
     }
 
     // Controlla l'interrupt di trasmettitore pronto
@@ -23,7 +28,7 @@ static void nxps32k358_lpuart_update_irq(NXPS32K358LpuartState *s) {
         // ma questo dipende dalla logica esatta del chip.
         // Per semplicità, qui li consideriamo indipendenti se non già irq_pending.
         // In molti casi, è un OR di tutte le condizioni.
-        irq_pending = true;
+        irq_pending = 1;
     }
     // La riga sopra può essere semplificata se tutti gli interrupt possono essere attivi contemporaneamente:
     // if ((s->lpuart_cr & LPUART_CTRL_TIE) && (s->lpuart_sr & LPUART_STAT_TDRE)) {
@@ -31,7 +36,7 @@ static void nxps32k358_lpuart_update_irq(NXPS32K358LpuartState *s) {
     // }
     // Controlla l'interrupt di trasmissione completata
     if ((s->lpuart_cr & LPUART_CTRL_TCIE) && (s->lpuart_sr & LPUART_STAT_TC)) {
-        irq_pending = true;
+        irq_pending = 1;
     }
 
     // AGGIUNGI QUI I CONTROLLI PER GLI INTERRUPT DI ERRORE (OR, NF, FE, PF)
@@ -46,7 +51,7 @@ static void nxps32k358_lpuart_update_irq(NXPS32K358LpuartState *s) {
 
 
     // Infine, imposta lo stato della linea IRQ
-    qemu_set_irq(s->irq, irq_pending ? 1 : 0);
+    qemu_set_irq(s->irq, irq_pending);
 }
 
 // Funzione chiamata quando QEMU può inviare un carattere al guest
@@ -54,10 +59,10 @@ static int nxps32k358_lpuart_can_receive(void *opaque) {
     NXPS32K358LpuartState *s = NXPS32K358_LPUART(opaque);
 
     // Controlla se c'è spazio nella FIFO di ricezione o se il ricevitore è abilitato
-    if (!(s->lpuart_cr & LPUART_CTRL_RE) || s->rx_fifo_len >= sizeof(s->rx_fifo)) {
-        return 0; // Non può ricevere
+    if (!(s->lpuart_cr & LPUART_CTRL_RE) ) {
+        return 1; // Non può ricevere
     }
-    return 1; // Può ricevere
+    return 0; // Può ricevere
 }
 
 //----- OK 17 May 18.55
@@ -70,21 +75,9 @@ static void nxps32k358_lpuart_receive(void *opaque, const uint8_t *buf, int size
     if (!(s->lpuart_cr & LPUART_CTRL_RE) || size == 0) {
         return;
     }
-
-    // Metti il carattere nella FIFO di ricezione (semplificato)
-    // In un'implementazione reale, gestisci overflow, errori di framing/parità se emulati.
-    if (s->rx_fifo_len < sizeof(s->rx_fifo)) {
-        s->rx_fifo[s->rx_fifo_pos + s->rx_fifo_len] = buf[0]; // Prende solo il primo carattere per semplicità
-        s->rx_fifo_len++;
-        s->lpuart_sr |= LPUART_STAT_RDRF; // Imposta Receive Data Register Full
-        s->lpuart_sr &= ~LPUART_STAT_TDRE; // Potrebbe essere necessario per la logica (TDRE è per TX)
-                                         // Questo è un esempio, la logica di STAT deve essere accurata.
-
-        qemu_log_mask(LOG_GUEST_ERROR, "LPUART RX: %02x ('%c')\n", buf[0], isprint(buf[0]) ? buf[0] : '.');
-    } else {
-        qemu_log_mask(LOG_GUEST_ERROR, "LPUART RX FIFO overflow\n");
-        // Imposta un flag di errore di overflow in STAT se la LPUART lo prevede
-    }
+    s->lpuart_dr = *buf;
+    s->lpuart_sr |= LPUART_STAT_RDRF; // set the status register on the flag receive data register full 
+    
 
     // at the end need to be done to send the Interrupt :)
     nxps32k358_lpuart_update_irq(s);
@@ -132,28 +125,19 @@ static uint64_t nxps32k358_lpuart_read(void *opaque, hwaddr offset, unsigned siz
             ret = s->lpuart_cr;
             break;
         case LPUART_DATA:
-            if (s->rx_fifo_len > 0) {
-                ret = s->rx_fifo[s->rx_fifo_pos];
-                s->rx_fifo_pos++;
-                s->rx_fifo_len--;
-                if (s->rx_fifo_len == 0) {
-                    s->rx_fifo_pos = 0;
-                    s->lpuart_sr &= ~LPUART_STAT_RDRF; // Clear Receive Data Register Full
-                }
-                qemu_log_mask(LOG_GUEST_ERROR, "LPUART read DATA: %02x ('%c')\n", ret, isprint(ret) ? ret : '.');
-            } else {
-                ret = 0; // FIFO vuota
-                qemu_log_mask(LOG_GUEST_ERROR, "LPUART read DATA: RX FIFO empty\n");
-            }
+    
             // La lettura di DATA spesso cancella RDRF e l'interrupt associato
             nxps32k358_lpuart_update_irq(s);
             break;
         // Aggiungi qui i case per altri registri leggibili (VERID, PARAM, FIFO, WATER, ecc.)
         // basandoti sul S32K3XXRM.pdf
-        case LPUART_VERID: ret = 0x04010003; break; // Valore esempio, metti quello reale
-        case LPUART_PARAM: ret = 0x00000202; break; // Valore esempio
+        case LPUART_VERID: 
+            ret = ; 
+            break; // Valore esempio, metti quello reale
+        case LPUART_PARAM: 
+            ret = ; 
+            break; // Valore esempio
         case LPUART_FIFO:
-            // ret = (s->tx_fifo_count << X) | (s->rx_fifo_count << Y); // Esempio
             break;
         default:
             qemu_log_mask(LOG_UNIMP, "NXP S32K3 LPUART: Unimplemented read offset 0x%" HWADDR_PRIx "\n", offset);
@@ -175,39 +159,34 @@ static void nxps32k358_lpuart_write(void *opaque, hwaddr offset, uint64_t value,
             // qemu_log_mask(LOG_GUEST_ERROR, "LPUART BAUD set to 0x%08x\n", (uint32_t)value);
             break;
         case LPUART_STAT:
-            // Alcuni bit di STAT sono write-1-to-clear.
-            // Esempio: s->lpuart_sr &= ~(value & (LPUART_STAT_SOME_W1C_FLAG));
-            // Verifica sul manuale quali bit sono W1C.
-            // qemu_log_mask(LOG_GUEST_ERROR, "LPUART STAT write 0x%08x (W1C?)\n", (uint32_t)value);
+            if (value <= 0x3FF) {
+                /* I/O being synchronous, TXE is always set. In addition, it may
+                only be set by hardware, so keep it set here. */
+                s->lpuart_sr = value | LPUART_STAT_TC;
+            } else {
+                s->lpuart_sr &= value;
+            }
             break;
         case LPUART_CTRL:
             s->lpuart_cr = value;
-            // Se TE o RE vengono disabilitati/abilitati, aggiorna lo stato
-            if (!(s->lpuart_cr & LPUART_CTRL_TE)) {
-                s->tx_char_pending = false; // Cancella eventuale trasmissione pendente
-            }
-            if (!(s->lpuart_cr & LPUART_CTRL_RE)) {
-                s->rx_fifo_len = 0; // Svuota la FIFO di ricezione
-                s->rx_fifo_pos = 0;
-                s->lpuart_sr &= ~LPUART_STAT_RDRF;
-            }
+            nxps32k358_update_irq(s);
+
             // qemu_log_mask(LOG_GUEST_ERROR, "LPUART CTRL set to 0x%08x\n", (uint32_t)value);
             break;
         case LPUART_DATA:
-            if (s->lpuart_cr & LPUART_CTRL_TE) { // Transmitter enabled
-                s->tx_char = (uint8_t)value;
-                s->tx_char_pending = true;
-                s->lpuart_sr &= ~LPUART_STAT_TDRE; // Non più vuoto, in attesa di trasmissione
-                // qemu_log_mask(LOG_GUEST_ERROR, "LPUART write DATA: %02x ('%c')\n", s->tx_char, isprint(s->tx_char) ? s->tx_char : '.');
-                nxps32k358_lpuart_transmit(s); // Tenta di trasmettere subito
+            if (value < 0xF000) {
+            ch = value;
+            /* XXX this blocks entire thread. Rewrite to use
+             * qemu_chr_fe_write and background I/O callbacks */
+            qemu_chr_fe_write_all(&s->chr, &ch, 1);
+            /* XXX I/O are currently synchronous, making it impossible for
+               software to observe transient states where TXE or TC aren't
+               set. Unlike TXE however, which is read-only, software may
+               clear TC by writing 0 to the SR register, so set it again
+               on each write. */
+            s->lpuart_sr |= LPUART_STAT_TC;
+            nxps32k358_update_irq(s);
             }
-            break;
-        // Aggiungi qui i case per altri registri scrivibili (PINCFG, MODIR, FIFO, WATER, ecc.)
-        // basandoti sul S32K3XXRM.pdf
-        case LPUART_FIFO:
-            // Gestisci abilitazione/flush delle FIFO (es. TXFE, RXFE, TXFLUSH, RXFLUSH)
-            // s->fifo_reg = value;
-            break;
         default:
             qemu_log_mask(LOG_UNIMP, "NXP S32K3 LPUART: Unimplemented write offset 0x%" HWADDR_PRIx " val 0x%" PRIx64 "\n", offset, value);
             break;
@@ -239,15 +218,13 @@ static void nxps32k358_lpuart_transmit(NXPS32K358LpuartState *s) {
 
 // Funzioni finali che vanno bene cosi come sono
 
+
+// FINAL FUNCTION FOR EACH VIRTUALIZED
 static const MemoryRegionOps nxps32k358_lpuart_ops = {
     .read = nxps32k358_lpuart_read,
     .write = nxps32k358_lpuart_write,
     .endianness = DEVICE_LITTLE_ENDIAN, // Verifica l'endianness delle periferiche S32K3
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 4, // Solitamente accessi a 8, 16, 32 bit
-    },
-};
+}
 
 
 

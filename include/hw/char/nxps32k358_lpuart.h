@@ -45,6 +45,7 @@ struct NXPS32K358LpuartState {
     uint32_t lpuart_cr;         // Valore del registro CTRL
     uint32_t lpuart_sr;         // Valore del registro STAT
     uint32_t fifo_reg;         // Valore del registro FIFO (se presente)
+    uint32_t lpuart_dr;
 
     uint8_t rx_fifo[16]; // Buffer di ricezione FIFO (dimensione esempio)
     unsigned int rx_fifo_pos;
